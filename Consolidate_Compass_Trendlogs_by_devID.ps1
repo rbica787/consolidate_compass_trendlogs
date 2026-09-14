@@ -13,8 +13,10 @@
 # - Recursively searches all subfolders
 # - Blank device selection = process ALL devices
 # - Enter specific device instance = process only that device
-# - Blank output location = save to source directory
-# - Creates ONE worksheet per device workbook: ALL TRENDLOGS
+# - Blank output location = use source directory as the base save path
+# - Creates a "###ALL TRENDLOGS" subdirectory inside the selected/base save path
+# - Creates ONE worksheet per device workbook, named with the unit label
+# - Trend columns use BACnet point name from the filename plus point description
 # - Before the final repeat prompt, optionally consolidates ONLY the workbooks
 #   created during the current run into one master workbook
 # - Master workbook preserves each source worksheet as a separate tab
@@ -127,6 +129,29 @@ do {
             ).Path
         }
     }
+
+
+    # ========================================================
+    # ALL TRENDLOGS OUTPUT SUBDIRECTORY
+    # ========================================================
+
+    $TrendlogOutputDirectory = Join-Path `
+        $OutputDirectory `
+        "###ALL TRENDLOGS"
+
+
+    if (-not (Test-Path -LiteralPath $TrendlogOutputDirectory -PathType Container)) {
+
+        New-Item `
+            -ItemType Directory `
+            -Path $TrendlogOutputDirectory `
+            -Force | Out-Null
+    }
+
+
+    $TrendlogOutputDirectory = (
+        Resolve-Path -LiteralPath $TrendlogOutputDirectory
+    ).Path
 
 
     # ========================================================
@@ -335,6 +360,10 @@ do {
 
                     $TrendNames = New-Object System.Collections.Generic.List[string]
 
+                    # Unit label used as the worksheet name (for example RTU-1, VAV-2.3, FCU-2).
+                    # It is taken from the filename segment after "present-value".
+                    $DeviceUnitLabel = $null
+
                     $TrendCounter = 0
 
 
@@ -441,15 +470,102 @@ do {
 
 
                         # ================================================
-                        # TREND NAME
+                        # POINT / UNIT / DESCRIPTION FROM FILE + CSV HEADER
                         # ================================================
 
-                        $TrendName = $ValueColumn.Trim()
+                        # Expected filename pattern:
+                        # Dev 10423, BI 6, present-value, UV-3, DESCRIPTION-M-2026-09.csv
+                        #
+                        # The BACnet point name ALWAYS follows the device instance.
+                        # Examples:
+                        #   BI 6  -> BI-6
+                        #   AV 2  -> AV-2
+                        #   BV 26 -> BV-26
+                        #   MV 30 -> MV-30
+
+                        $PointName = $null
+                        $UnitLabelFromFile = $null
 
 
-                        if ([string]::IsNullOrWhiteSpace($TrendName)) {
+                        if (
+                            $CsvFile.BaseName -match
+                            '^Dev\s+\d+\s*,\s*([^,]+)\s*,\s*[^,]+\s*,\s*([^,]+)(?:,\s*(.*))?$'
+                        ) {
 
-                            $TrendName = $CsvFile.BaseName
+                            $PointNameRaw = $Matches[1].Trim()
+                            $UnitLabelFromFile = $Matches[2].Trim()
+
+
+                            # Normalize "AV 2" / "AV-2" to "AV-2".
+                            if ($PointNameRaw -match '^([A-Za-z]+)[\s-]+(\d+)$') {
+
+                                $PointName = "$($Matches[1].ToUpperInvariant())-$($Matches[2])"
+
+                            }
+                            else {
+
+                                $PointName = $PointNameRaw
+                            }
+
+
+                            # Normalize common unit labels such as RTU1 / RTU 1 / RTU-1
+                            # to RTU-1. Labels already containing more complex numbering
+                            # such as HP-1-29 are left unchanged.
+                            if (-not [string]::IsNullOrWhiteSpace($UnitLabelFromFile)) {
+
+                                if ($UnitLabelFromFile -match '^([A-Za-z]+)[\s-]*(\d+(?:\.\d+)*)$') {
+
+                                    $NormalizedUnitLabel = "$($Matches[1].ToUpperInvariant())-$($Matches[2])"
+
+                                }
+                                else {
+
+                                    $NormalizedUnitLabel = $UnitLabelFromFile
+                                }
+
+
+                                if ([string]::IsNullOrWhiteSpace($DeviceUnitLabel)) {
+
+                                    $DeviceUnitLabel = $NormalizedUnitLabel
+                                }
+                            }
+                        }
+
+
+                        # Fallback if a filename does not match the expected pattern.
+                        if ([string]::IsNullOrWhiteSpace($PointName)) {
+
+                            $PointName = $CsvFile.BaseName
+                        }
+
+
+                        # The original CSV value header commonly looks like:
+                        #   RTU1, HTG OUTPUT CMD
+                        #
+                        # Keep only the description portion after the first comma.
+                        # If there is no description, the column header is point name only.
+                        $PointDescription = $ValueColumn.Trim()
+
+
+                        if ($PointDescription -match '^[^,]+,\s*(.+)$') {
+
+                            $PointDescription = $Matches[1].Trim()
+                        }
+
+
+                        if (
+                            [string]::IsNullOrWhiteSpace($PointDescription) -or
+                            $PointDescription -eq $PointName -or
+                            $PointDescription -eq $UnitLabelFromFile -or
+                            $PointDescription -eq $DeviceUnitLabel
+                        ) {
+
+                            $TrendName = $PointName
+
+                        }
+                        else {
+
+                            $TrendName = "$PointName, $PointDescription"
                         }
 
 
@@ -623,7 +739,31 @@ do {
 
                         $Worksheet = $Workbook.Worksheets.Item(1)
 
-                        $Worksheet.Name = "ALL TRENDLOGS"
+
+                        # Use the unit label as the worksheet name.
+                        # Fall back to the device instance if a unit label was not found.
+                        $WorksheetName = $DeviceUnitLabel
+
+
+                        if ([string]::IsNullOrWhiteSpace($WorksheetName)) {
+
+                            $WorksheetName = "Dev $DeviceInstance"
+                        }
+
+
+                        # Excel worksheet names cannot contain these characters
+                        # and are limited to 31 characters.
+                        $WorksheetName = $WorksheetName -replace '[\\/:?*\[\]]', '_'
+                        $WorksheetName = $WorksheetName.Trim()
+
+
+                        if ($WorksheetName.Length -gt 31) {
+
+                            $WorksheetName = $WorksheetName.Substring(0, 31)
+                        }
+
+
+                        $Worksheet.Name = $WorksheetName
 
 
                         # Delete any additional default worksheets
@@ -914,15 +1054,33 @@ do {
                         $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
 
+                        # Include the unit label directly after the device instance
+                        # in the consolidated workbook filename.
+                        # Example: Dev 10423 RTU-1 ALL TRENDLOGS 20260914_112500.xlsx
+                        $FileUnitLabel = $DeviceUnitLabel
+
+
+                        if ([string]::IsNullOrWhiteSpace($FileUnitLabel)) {
+
+                            $FileUnitLabel = "UNKNOWN UNIT"
+                        }
+
+
+                        # Remove characters that are invalid in Windows filenames.
+                        $FileUnitLabel = $FileUnitLabel -replace '[<>:"/\|?*]', '_'
+                        $FileUnitLabel = $FileUnitLabel.Trim()
+
+
                         $OutputFileName = (
-                            "Dev {0} ALL TRENDLOGS {1}.xlsx" -f `
+                            "Dev {0} {1} ALL TRENDLOGS {2}.xlsx" -f `
                             $DeviceInstance,
+                            $FileUnitLabel,
                             $Timestamp
                         )
 
 
                         $OutputPath = Join-Path `
-                            $OutputDirectory `
+                            $TrendlogOutputDirectory `
                             $OutputFileName
 
 
@@ -934,15 +1092,16 @@ do {
                         while (Test-Path -LiteralPath $OutputPath) {
 
                             $OutputFileName = (
-                                "Dev {0} ALL TRENDLOGS {1} ({2}).xlsx" -f `
+                                "Dev {0} {1} ALL TRENDLOGS {2} ({3}).xlsx" -f `
                                 $DeviceInstance,
+                                $FileUnitLabel,
                                 $Timestamp,
                                 $DuplicateCounter
                             )
 
 
                             $OutputPath = Join-Path `
-                                $OutputDirectory `
+                                $TrendlogOutputDirectory `
                                 $OutputFileName
 
 
@@ -1060,7 +1219,7 @@ do {
                     Write-Host ""
                     Write-Host "The workbooks created during this run can now be combined" -ForegroundColor Yellow
                     Write-Host "into one workbook. Each worksheet will remain on its own tab." -ForegroundColor Yellow
-                    Write-Host "Device instances will be retained in the consolidated tab names." -ForegroundColor Yellow
+                    Write-Host "Unit labels will be retained as the consolidated tab names." -ForegroundColor Yellow
                     Write-Host ""
 
                     $CreateMasterWorkbook = Read-Host "Consolidate all newly created workbooks into one workbook? (Y/n) [Default: Y]"
@@ -1141,12 +1300,9 @@ do {
 
                                         try {
 
-                                            if ($DeviceInstanceForTabs) {
-                                                $DesiredSheetName = "Dev $DeviceInstanceForTabs $OriginalSheetName"
-                                            }
-                                            else {
-                                                $DesiredSheetName = $OriginalSheetName
-                                            }
+                                            # Preserve the source worksheet name (the unit label)
+                                            # in the consolidated master workbook.
+                                            $DesiredSheetName = $OriginalSheetName
 
                                             # Excel worksheet names cannot contain these characters.
                                             $DesiredSheetName = $DesiredSheetName -replace '[\\/:?*\[\]]', '_'
@@ -1258,14 +1414,14 @@ do {
 
                                 $MasterTimestamp = Get-Date -Format "yyyyMMdd_HHmmss"
                                 $MasterOutputFileName = "ALL DEVICES CONSOLIDATED TRENDLOGS $MasterTimestamp.xlsx"
-                                $MasterOutputPath = Join-Path $OutputDirectory $MasterOutputFileName
+                                $MasterOutputPath = Join-Path $TrendlogOutputDirectory $MasterOutputFileName
 
                                 $MasterDuplicateCounter = 2
 
                                 while (Test-Path -LiteralPath $MasterOutputPath) {
 
                                     $MasterOutputFileName = "ALL DEVICES CONSOLIDATED TRENDLOGS $MasterTimestamp ($MasterDuplicateCounter).xlsx"
-                                    $MasterOutputPath = Join-Path $OutputDirectory $MasterOutputFileName
+                                    $MasterOutputPath = Join-Path $TrendlogOutputDirectory $MasterOutputFileName
                                     $MasterDuplicateCounter++
                                 }
 
@@ -1403,7 +1559,7 @@ do {
 
                 Write-Host ""
                 Write-Host "Output directory:" -ForegroundColor Yellow
-                Write-Host $OutputDirectory
+                Write-Host $TrendlogOutputDirectory
                 Write-Host ""
 
 
