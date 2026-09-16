@@ -18,7 +18,7 @@
 # - Creates ONE worksheet per device workbook, named with the unit label
 # - Trend columns use BACnet point name from the filename plus point description
 # - Before the final repeat prompt, optionally consolidates ONLY the workbooks
-#   created during the current run into one master workbook
+#   created during the current run into one master workbook (default: No)
 # - Master workbook preserves each source worksheet as a separate tab
 # - Device instance is retained in each master workbook tab name
 # - Consolidation routine supports CSV, XLS, XLSX, XLSM, and XLSB sources
@@ -1222,10 +1222,10 @@ do {
                     Write-Host "Unit labels will be retained as the consolidated tab names." -ForegroundColor Yellow
                     Write-Host ""
 
-                    $CreateMasterWorkbook = Read-Host "Consolidate all newly created workbooks into one workbook? (Y/n) [Default: Y]"
+                    $CreateMasterWorkbook = Read-Host "Consolidate all newly created workbooks into one workbook? (y/N) [Default: N]"
 
-                    # Default is YES: pressing Enter consolidates. Only an explicit N skips it.
-                    if ($CreateMasterWorkbook -notmatch '^[Nn]') {
+                    # Default is NO: pressing Enter skips consolidation. Only an explicit Y consolidates.
+                    if ($CreateMasterWorkbook -match '^[Yy]') {
 
                         $MasterWorkbook = $null
                         $MasterWorksheet = $null
