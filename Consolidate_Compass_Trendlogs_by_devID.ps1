@@ -10,7 +10,8 @@
 # Dev 10423 ALL TRENDLOGS 20260910_161100.xlsx
 #
 # Behavior:
-# - Recursively searches all subfolders
+# - Processes CSVs in the selected folder AND recursively in all subfolders
+# - Skips 0-byte/empty CSV placeholder files
 # - Blank device selection = process ALL devices
 # - Enter specific device instance = process only that device
 # - Blank output location = use source directory as the base save path
@@ -171,10 +172,24 @@ do {
             -Recurse `
             -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.Name -match '^Dev\s+(\d+),'
+            # Alerton exports can include 0-byte placeholder CSVs.
+            # Only process files that contain actual trend data.
+            $_.Name -match '^Dev\s+(\d+)\s*,' -and $_.Length -gt 0
         }
     )
 
+
+    # Report empty Alerton CSV placeholders separately.
+    $EmptyCsvFiles = @(
+        Get-ChildItem -LiteralPath $SourceDirectory -Filter "*.csv" -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^Dev\s+(\d+)\s*,' -and $_.Length -eq 0 }
+    )
+
+    if ($EmptyCsvFiles.Count -gt 0) {
+        Write-Host "Empty/0-byte trendlog CSVs skipped: $($EmptyCsvFiles.Count)" -ForegroundColor Yellow
+        Write-Host "These files contain no trend data and cannot be consolidated." -ForegroundColor DarkYellow
+        Write-Host ""
+    }
 
     if ($CsvFiles.Count -eq 0) {
 
@@ -227,7 +242,7 @@ do {
                     $CsvFiles |
                     Where-Object {
 
-                        if ($_.Name -match '^Dev\s+(\d+),') {
+                        if ($_.Name -match '^Dev\s+(\d+)\s*,') {
 
                             $Matches[1] -eq $SelectedDevice
                         }
@@ -275,7 +290,7 @@ do {
                 $CsvFiles |
                 ForEach-Object {
 
-                    if ($_.Name -match '^Dev\s+(\d+),') {
+                    if ($_.Name -match '^Dev\s+(\d+)\s*,') {
 
                         [PSCustomObject]@{
                             DeviceInstance = $Matches[1]
