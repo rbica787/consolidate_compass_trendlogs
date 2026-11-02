@@ -13,6 +13,7 @@
 #   blanks, but never replaces an existing value with a blank.
 # - Optionally combines this run's device workbooks into one.
 # - Does not change the original CSV files.
+# - Uses caching, bulk Excel writes, and fixed column widths.
 # - Uses Array.SetValue(row,column) to prevent PowerShell's
 #   multidimensional index expression parsing ambiguity.
 # Requires Windows with Microsoft Excel installed.
@@ -182,6 +183,11 @@ do {
             $Excel.Visible = $false
             $Excel.DisplayAlerts = $false
             $Excel.ScreenUpdating = $false
+            $Excel.EnableEvents = $false
+            # Avoid setting Excel.Calculation here. Excel can reject manual mode
+            # (0x800A03EC), particularly with OLAP-backed workbooks.
+            # These generated trendlog workbooks contain no formulas, so
+            # changing calculation mode offers little performance benefit.
             $xlOpenXMLWorkbook = 51
 
             $DeviceNumber = 0
@@ -202,6 +208,8 @@ do {
                 $ImportFailures = 0
                 $WithinFileDuplicates = 0
                 $FilesImported = 0
+                # Cache repeated timestamp parsing across exports for this device.
+                $TimeInfoCache = @{}
 
                 foreach ($CsvFile in $Files) {
                     Write-Host "  Reading: $($CsvFile.Name)" -ForegroundColor Gray
@@ -266,7 +274,11 @@ do {
                         $NonemptyUniqueTimestamps = 0
 
                         foreach ($Row in $CsvData) {
-                            $info = Get-TimeInfo ([string]$Row.$TimeColumn)
+                            $rawTime = ([string]$Row.$TimeColumn).Trim()
+                            if (-not $TimeInfoCache.ContainsKey($rawTime)) {
+                                $TimeInfoCache[$rawTime] = Get-TimeInfo $rawTime
+                            }
+                            $info = $TimeInfoCache[$rawTime]
                             if ($null -eq $info) { continue }
                             $value = ([string]$Row.$ValueColumn).Trim()
 
@@ -438,10 +450,18 @@ do {
 
                     $TotalDataRows = $SortedRows.Count
                     $TotalColumns = $TrendNames.Count + 1
-                    $Worksheet.Cells.Item(1,1).Value2 = 'Time'
+                    # Write all headers in a single COM call.
+                    $HeaderArray = New-Object 'object[,]' 1,$TotalColumns
+                    $HeaderArray.SetValue('Time',0,0)
+                    $ColumnByTrend = @{}
                     for ($j = 0; $j -lt $TrendNames.Count; $j++) {
-                        $Worksheet.Cells.Item(1,$j + 2).Value2 = [string]$TrendNames[$j]
+                        $HeaderArray.SetValue([string]$TrendNames[$j],0,($j + 1))
+                        $ColumnByTrend[[string]$TrendNames[$j]] = $j + 1
                     }
+                    $Worksheet.Range(
+                        $Worksheet.Cells.Item(1,1),
+                        $Worksheet.Cells.Item(1,$TotalColumns)
+                    ).Value2 = $HeaderArray
 
                     if ($TotalDataRows -gt 0) {
                         $DataArray = New-Object 'object[,]' $TotalDataRows,$TotalColumns
@@ -455,18 +475,18 @@ do {
                                 $DataArray.SetValue([string]$current.TimeText, $i, 0)
                             }
 
-                            for ($j = 0; $j -lt $TrendNames.Count; $j++) {
-                                $name = $TrendNames[$j]
-                                if (-not $current.Values.ContainsKey($name)) { continue }
+                            # Only visit populated values, not every point for every timestamp.
+                            foreach ($name in $current.Values.Keys) {
+                                $columnIndex = [int]$ColumnByTrend[$name]
                                 $value = [string]$current.Values[$name]
                                 $number = 0.0
                                 if ([double]::TryParse($value,
                                         [System.Globalization.NumberStyles]::Any,
                                         $culture,[ref]$number)) {
-                                    $DataArray.SetValue($number, $i, ($j + 1))
+                                    $DataArray.SetValue($number, $i, $columnIndex)
                                 }
                                 else {
-                                    $DataArray.SetValue($value, $i, ($j + 1))
+                                    $DataArray.SetValue($value, $i, $columnIndex)
                                 }
                             }
                         }
@@ -489,14 +509,14 @@ do {
                     $Worksheet.Activate()
                     $Excel.ActiveWindow.SplitRow = 1
                     $Excel.ActiveWindow.FreezePanes = $true
-                    $Worksheet.UsedRange.Columns.AutoFit() | Out-Null
-                    for ($col = 1; $col -le $TotalColumns; $col++) {
-                        $c = $Worksheet.Columns.Item($col)
-                        if ($c.ColumnWidth -gt 40) { $c.ColumnWidth = 40 }
-                        Release-ComObject $c
-                    }
-                    if ($Worksheet.Columns.Item(1).ColumnWidth -lt 21) {
-                        $Worksheet.Columns.Item(1).ColumnWidth = 21
+                    # AutoFit on hundreds of thousands of cells is extremely slow.
+                    # Fixed readable widths avoid full-sheet scanning and COM per-column calls.
+                    $Worksheet.Columns.Item(1).ColumnWidth = 22
+                    if ($TotalColumns -gt 1) {
+                        $Worksheet.Range(
+                            $Worksheet.Cells.Item(1,2),
+                            $Worksheet.Cells.Item(1,$TotalColumns)
+                        ).EntireColumn.ColumnWidth = 24
                     }
 
                     $FileUnitLabel = ($DeviceUnitLabel -replace '[<>:"/\\|?*]', '_').Trim()
@@ -623,6 +643,7 @@ do {
         }
         catch {
             Write-Host "Fatal error: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "Script line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Yellow
         }
         finally {
             if ($Excel) { try { $Excel.Quit() } catch {} }
